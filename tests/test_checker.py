@@ -3,8 +3,8 @@ from __future__ import annotations
 import unittest
 from datetime import date
 
-from telegram_checkin.checker import check_bot, classify_text
-from telegram_checkin.models import BotConfig, CheckStatus
+from telegram_checkin.checker import check_bot, check_website, classify_text
+from telegram_checkin.models import BotConfig, CheckStatus, WebsiteConfig
 
 
 class CheckerTests(unittest.TestCase):
@@ -71,6 +71,26 @@ class CheckinWorkflowTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(session.calls, [])
         self.assertEqual(result.status, CheckStatus.SKIPPED)
+
+    async def test_classifies_website_checkin_response(self) -> None:
+        result = await check_website(
+            _FakeWebsiteSession(True, "签到成功"),
+            _FakeStore(),
+            WebsiteConfig(),
+            date(2026, 8, 30),
+            "https://www.820010.xyz/",
+        )
+
+        self.assertEqual(result.status, CheckStatus.SUCCESS)
+
+
+class _FakeWebsiteSession:
+    def __init__(self, ok: bool, response: str) -> None:
+        self.ok = ok
+        self.response = response
+
+    async def checkin(self, config: WebsiteConfig) -> tuple[bool, str]:
+        return self.ok, self.response
 
 
 class _FakeSession:

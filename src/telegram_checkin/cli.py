@@ -16,7 +16,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "command",
         choices=("login", "once", "daemon", "validate"),
-        help="authorize Telegram, run now, run the scheduler, or validate configuration",
+        help="authorize 820010.xyz and Telegram, run now, run the scheduler, or validate configuration",
     )
     parser.add_argument(
         "--config",

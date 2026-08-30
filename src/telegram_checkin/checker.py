@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Protocol
 
-from .models import BotConfig, CheckResult, CheckStatus
+from .models import BotConfig, CheckResult, CheckStatus, WebsiteConfig
 from .storage import AttemptStore
 
 
@@ -13,6 +13,10 @@ class TelegramSession(Protocol):
     async def send_command(self, command: str, timeout_seconds: int) -> str: ...
 
     async def click_button(self, text: str, timeout_seconds: int) -> str: ...
+
+
+class WebsiteSession(Protocol):
+    async def checkin(self, config: WebsiteConfig) -> tuple[bool, str]: ...
 
 
 def classify_text(text: str | None, bot: BotConfig) -> CheckStatus | None:
@@ -49,6 +53,47 @@ async def check_bot(
     if checkin_status is not None:
         return CheckResult(bot.target, checkin_status, _result_detail(checkin_response))
     return CheckResult(bot.target, CheckStatus.UNCONFIRMED, _result_detail(checkin_response))
+
+
+async def check_website(
+    session: WebsiteSession,
+    store: AttemptStore,
+    config: WebsiteConfig,
+    local_date: date,
+    target: str,
+) -> CheckResult:
+    if store.completed_on(target, local_date):
+        return CheckResult(target, CheckStatus.SKIPPED, "already completed in local history")
+
+    successful_request, response_text = await session.checkin(config)
+    status = classify_patterns(
+        response_text,
+        config.success_patterns,
+        config.already_patterns,
+        config.failure_patterns,
+    )
+    if status is None:
+        status = CheckStatus.SUCCESS if successful_request else CheckStatus.FAILED
+    return CheckResult(target, status, _result_detail(response_text))
+
+
+def classify_patterns(
+    text: str | None,
+    success_patterns: tuple[str, ...],
+    already_patterns: tuple[str, ...],
+    failure_patterns: tuple[str, ...],
+) -> CheckStatus | None:
+    if not text:
+        return None
+    normalized = " ".join(text.casefold().split())
+    for status, patterns in (
+        (CheckStatus.ALREADY, already_patterns),
+        (CheckStatus.SUCCESS, success_patterns),
+        (CheckStatus.FAILED, failure_patterns),
+    ):
+        if any(pattern.casefold() in normalized for pattern in patterns):
+            return status
+    return None
 
 
 async def run_bot_safely(

@@ -15,6 +15,7 @@ from .models import (
     BotConfig,
     RuntimeConfig,
     ScheduleConfig,
+    WebsiteConfig,
 )
 
 
@@ -99,9 +100,42 @@ def load_app_config(path: str | Path) -> AppConfig:
             )
         )
 
+    website_raw = raw.get("website", {})
+    if website_raw is None:
+        website_raw = {}
+    if not isinstance(website_raw, dict):
+        raise ConfigError("website must be a mapping")
+    website_defaults = WebsiteConfig()
+    website_timeout = website_raw.get("timeout_seconds", website_defaults.timeout_seconds)
+    if (
+        not isinstance(website_timeout, int)
+        or isinstance(website_timeout, bool)
+        or not 5 <= website_timeout <= 300
+    ):
+        raise ConfigError("website.timeout_seconds must be an integer from 5 to 300")
+
     return AppConfig(
         schedule=ScheduleConfig(time=schedule_time, timezone=timezone),
         bots=tuple(bots),
+        website=WebsiteConfig(
+            button_text=_nonempty_string(website_raw.get("button", "签到"), "website.button"),
+            timeout_seconds=website_timeout,
+            success_patterns=_patterns(
+                website_raw.get("success_patterns"),
+                "website.success_patterns",
+                website_defaults.success_patterns,
+            ),
+            already_patterns=_patterns(
+                website_raw.get("already_patterns"),
+                "website.already_patterns",
+                website_defaults.already_patterns,
+            ),
+            failure_patterns=_patterns(
+                website_raw.get("failure_patterns"),
+                "website.failure_patterns",
+                website_defaults.failure_patterns,
+            ),
+        ),
     )
 
 
@@ -118,16 +152,45 @@ def load_runtime_config() -> RuntimeConfig:
         or not parsed_web_url.path.startswith("/k")
     ):
         raise ConfigError("TELEGRAM_WEB_URL must use https://web.telegram.org/k/")
+
+    website_url = os.environ.get("WEBSITE_URL", "https://www.820010.xyz/").strip()
+    parsed_website_url = urlparse(website_url)
+    if (
+        parsed_website_url.scheme != "https"
+        or parsed_website_url.hostname not in {"820010.xyz", "www.820010.xyz"}
+    ):
+        raise ConfigError("WEBSITE_URL must use https://www.820010.xyz/")
+
+    telegram_bot_token = _optional_environment("TELEGRAM_BOT_TOKEN")
+    telegram_notify_chat_id = _optional_environment("TELEGRAM_NOTIFY_CHAT_ID")
+    if bool(telegram_bot_token) != bool(telegram_notify_chat_id):
+        raise ConfigError(
+            "TELEGRAM_BOT_TOKEN and TELEGRAM_NOTIFY_CHAT_ID must be set together"
+        )
+
     return RuntimeConfig(
         browser_profile_path=str(data_dir / "browser-profile"),
+        website_browser_profile_path=str(data_dir / "website-browser-profile"),
         database_path=str(data_dir / "checkins.sqlite3"),
         login_screenshot_path=str(data_dir / "telegram-login.png"),
         telegram_web_url=telegram_web_url,
+        website_url=website_url,
         headless=_environment_bool("BROWSER_HEADLESS", True),
+        website_login_headless=_environment_bool("WEBSITE_LOGIN_HEADLESS", False),
         login_host=os.environ.get("LOGIN_HOST", "0.0.0.0").strip(),
         login_port=login_port,
         login_timeout_seconds=login_timeout,
+        telegram_bot_token=telegram_bot_token,
+        telegram_notify_chat_id=telegram_notify_chat_id,
+        notification_timeout_seconds=_environment_int("NOTIFICATION_TIMEOUT_SECONDS", 15, 5, 120),
     )
+
+
+def _optional_environment(name: str) -> str | None:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return None
+    return value.strip()
 
 
 def _environment_bool(name: str, default: bool) -> bool:
