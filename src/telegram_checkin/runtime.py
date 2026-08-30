@@ -28,9 +28,23 @@ def next_run_at(now: datetime, schedule_time: str, timezone: str) -> datetime:
     return candidate
 
 
-async def login(runtime: RuntimeConfig) -> None:
+async def login_website(runtime: RuntimeConfig) -> None:
+    """Authorize only the 820010.xyz website session.
+
+    Does NOT touch the Telegram Web browser profile. Use this when the
+    website cookie has expired but Telegram is still valid (or vice versa),
+    so the two login states stay fully independent.
+    """
     await _login_website(runtime)
 
+
+async def login_telegram(runtime: RuntimeConfig) -> None:
+    """Authorize only the Telegram Web session.
+
+    Does NOT touch the 820010.xyz browser profile. Use this when Telegram
+    has logged you out (e.g. cookie expiry, Web K refresh) without
+    disturbing the website login state.
+    """
     screenshot = Path(runtime.login_screenshot_path)
     screenshot.parent.mkdir(parents=True, exist_ok=True)
     screenshot.unlink(missing_ok=True)
@@ -45,7 +59,9 @@ async def login(runtime: RuntimeConfig) -> None:
             async with LoginPreviewServer(
                 runtime.login_screenshot_path, runtime.login_host, runtime.login_port
             ):
-                print(f"Open http://127.0.0.1:{runtime.login_port} and scan the Telegram QR code")
+                print(
+                    f"Open http://127.0.0.1:{runtime.login_port} and scan the Telegram QR code"
+                )
                 deadline = monotonic() + runtime.login_timeout_seconds
                 while monotonic() < deadline:
                     if not await client.login_required():
@@ -59,6 +75,18 @@ async def login(runtime: RuntimeConfig) -> None:
                 )
     finally:
         screenshot.unlink(missing_ok=True)
+
+
+async def login(runtime: RuntimeConfig) -> None:
+    """Authorize BOTH 820010.xyz and Telegram, in that order.
+
+    Each step uses a separate browser profile (DATA_DIR/website-browser-profile
+    vs DATA_DIR/browser-profile) so the two cookies never collide. If you only
+    need to refresh one of them, prefer the dedicated `login-website` and
+    `login-telegram` subcommands to avoid touching the other profile.
+    """
+    await login_website(runtime)
+    await login_telegram(runtime)
 
 
 async def run_once(app: AppConfig, runtime: RuntimeConfig) -> tuple[CheckResult, ...]:

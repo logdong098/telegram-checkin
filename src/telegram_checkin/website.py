@@ -103,7 +103,7 @@ class WebsiteClient:
         await self.ensure_authenticated()
         page = self._require_page()
         button = page.locator(_CHECKIN_BUTTON_SELECTOR).first
-        if await button.count() == 0 or config.button_text != "签到":
+        if (await button.count()) == 0 or config.button_text != "签到":
             button = page.get_by_role("button", name=config.button_text, exact=True).first
         try:
             await button.wait_for(state="visible", timeout=config.timeout_seconds * 1_000)
@@ -112,15 +112,38 @@ class WebsiteClient:
                 "820010.xyz check-in button was not found; verify that a subscription is active"
             ) from exc
 
-        try:
-            async with page.expect_response(
-                lambda response: "/api/seats/checkin" in response.url,
-                timeout=config.timeout_seconds * 1_000,
-            ) as response_info:
-                await button.click()
-            response = await response_info.value
-        except PlaywrightTimeout as exc:
-            raise WebsiteCheckinError("820010.xyz check-in request timed out") from exc
+        # The site shows a first-time onboarding overlay
+        # (#seat-help-scrim.is-open) immediately after login / a fresh cookie.
+        # It sits on top of the check-in button and intercepts pointer events
+        # — Playwright's actionability check then refuses the click and the
+        # batch dies with "check-in request timed out". Dismiss the overlay
+        # before each attempt; the React app can re-mount it, so we retry
+        # both dismissal and click until the /api/seats/checkin response
+        # arrives (or we exhaust the per-attempt timeout budget).
+        last_exc: PlaywrightTimeout | None = None
+        for attempt in range(5):
+            await _dismiss_onboarding_scrim(page)
+            try:
+                async with page.expect_response(
+                    lambda response: "/api/seats/checkin" in response.url,
+                    timeout=config.timeout_seconds * 1_000,
+                ) as response_info:
+                    # force=True bypasses the actionability check, so the
+                    # click goes through even if the overlay re-mounts in
+                    # the same frame. The network response observer above
+                    # still requires a real /api/seats/checkin request.
+                    await button.click(force=True)
+                response = await response_info.value
+                break
+            except PlaywrightTimeout as exc:
+                last_exc = exc
+                await page.wait_for_timeout(300)
+        else:  # exhausted all attempts without a response
+            raise WebsiteCheckinError(
+                "820010.xyz check-in request timed out after dismissing the "
+                "onboarding overlay; the check-in button may be in a state "
+                "the automation does not yet handle"
+            ) from last_exc
 
         payload = await _response_payload(response)
         if response.status in {401, 403}:
@@ -160,6 +183,86 @@ async def _response_payload(response: Response) -> object:
         return await response.json()
     except Exception:  # noqa: BLE001 - retain HTTP status when the server sends non-JSON
         return {}
+
+
+_ONBOARDING_DISMISS_TEXTS: tuple[str, ...] = (
+    "我知道了",
+    "知道了",
+    "知道了!",
+    "我明白",
+    "好的",
+    "关闭",
+    "Skip",
+    "skip",
+    "Got it",
+)
+
+
+async def _dismiss_onboarding_scrim(page: Page) -> None:
+    """Close the first-time onboarding overlay on 820010.xyz.
+
+    The overlay (`#seat-help-scrim.is-open`) intercepts pointer events on
+    the check-in button. The site shows it for users whose browser-profile
+    has never clicked the check-in button before — the very first run
+    after `login` triggers it. We try a sequence of dismissal strategies
+    in order of robustness:
+
+    1. Click any in-overlay close-ish button (with force=True so we still
+       win against the overlay's own pointer-events: auto).
+    2. Click a button whose accessible name is a known "got it" string.
+    3. As a last resort, remove the overlay from the DOM and clear any
+       body scroll-lock classes the React app added alongside it.
+
+    This is best-effort: if the overlay isn't present (most check-ins)
+    every step is a no-op and the function returns quickly.
+    """
+    try:
+        scrim = page.locator("#seat-help-scrim")
+        if (await scrim.count()) == 0:
+            return
+    except Exception:  # noqa: BLE001 - if the locator probe fails, give up cleanly
+        return
+
+    # 1) In-overlay buttons (close, x, skip)
+    for sel in (
+        "#seat-help-scrim button",
+        "#seat-help-scrim .close",
+        "#seat-help-scrim [data-close]",
+        "#seat-help-scrim [aria-label]",
+    ):
+        try:
+            loc = page.locator(sel)
+            if (await loc.count()) > 0:
+                await loc.first.click(timeout=1_500, force=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+    # 2) Known Chinese / English "got it" labels
+    for text in _ONBOARDING_DISMISS_TEXTS:
+        try:
+            loc = page.get_by_role("button", name=text)
+            if (await loc.count()) > 0:
+                await loc.first.click(timeout=1_000, force=True)
+                return
+        except Exception:  # noqa: BLE001
+            continue
+
+    # 3) Fallback: rip the overlay out of the DOM and clear any scroll lock
+    try:
+        await page.evaluate(
+            """() => {
+                const s = document.querySelector('#seat-help-scrim');
+                if (s) s.remove();
+                for (const el of [document.body, document.documentElement]) {
+                    el.classList.remove(
+                        'is-scroll-locked', 'no-scroll', 'overflow-hidden'
+                    );
+                }
+                return true;
+            }"""
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _payload_detail(payload: object) -> str:

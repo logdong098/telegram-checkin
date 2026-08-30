@@ -7,16 +7,42 @@ import os
 import sys
 
 from .config import ConfigError, load_app_config, load_runtime_config
-from .runtime import exit_code, login, run_daemon, run_once
+from .runtime import (
+    exit_code,
+    login,
+    login_telegram,
+    login_website,
+    run_daemon,
+    run_once,
+)
 from .web import AuthorizationError
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="telegram-checkin")
+    parser = argparse.ArgumentParser(
+        prog="telegram-checkin",
+        description=(
+            "Authorize 820010.xyz and Telegram, run check-ins now, or run the scheduler."
+        ),
+    )
     parser.add_argument(
         "command",
-        choices=("login", "once", "daemon", "validate"),
-        help="authorize 820010.xyz and Telegram, run now, run the scheduler, or validate configuration",
+        choices=(
+            "login",
+            "login-website",
+            "login-telegram",
+            "once",
+            "daemon",
+            "validate",
+        ),
+        help=(
+            "login: authorize BOTH 820010.xyz and Telegram (default). "
+            "login-website: only 820010.xyz (does not touch the Telegram profile). "
+            "login-telegram: only Telegram Web (does not touch the 820010 profile). "
+            "once: run a single check-in batch. "
+            "daemon: run the scheduler forever. "
+            "validate: validate the config."
+        ),
     )
     parser.add_argument(
         "--config",
@@ -34,8 +60,15 @@ def main() -> None:
     args = build_parser().parse_args()
 
     try:
-        if args.command == "login":
-            asyncio.run(login(load_runtime_config()))
+        runtime = None
+        if args.command in {"login", "login-website", "login-telegram"}:
+            runtime = load_runtime_config()
+            if args.command == "login":
+                asyncio.run(login(runtime))
+            elif args.command == "login-website":
+                asyncio.run(login_website(runtime))
+            else:
+                asyncio.run(login_telegram(runtime))
             return
 
         app = load_app_config(args.config)

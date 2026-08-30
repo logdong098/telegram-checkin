@@ -116,14 +116,40 @@ class TelegramWebClient:
         search = page.locator(_SEARCH_SELECTOR).first
         await search.wait_for(state="visible", timeout=timeout_ms)
         search_query = target[:-4] if target.casefold().endswith(" bot") else target
-        await search.fill(search_query)
-        try:
-            result = await self._wait_for_search_result(target, timeout_ms / 1_000)
-            await result.click()
-        except TimeoutError as exc:
-            raise BotNotFoundError(
-                f"bot not found via search: {target}; check the @username is correct"
-            ) from exc
+        # Web K's search dropdown is a React component that mounts
+        # asynchronously. A search that races the mount can leave a stale
+        # result set even when the bot exists, so we wait for the dropdown
+        # to actually appear before issuing fill(), and we tolerate the
+        # "no result" -> re-search transient that some users hit when the
+        # component re-renders.
+        dropdown = page.locator(f"{_SEARCH_SCOPE_SELECTOR} .search-group")
+        last_exc: TimeoutError | None = None
+        for attempt in range(3):
+            try:
+                # Clear the field, focus it, then type the query. A naked
+                # fill() can be eaten by a search component that hasn't
+                # bound its on-change handler yet.
+                await search.click()
+                await search.press("Control+a")
+                await search.press("Delete")
+                await search.fill(search_query)
+                # The dropdown renders below the input; wait for the
+                # search-group container to populate before sampling.
+                try:
+                    await dropdown.first.wait_for(state="visible", timeout=3_000)
+                except PlaywrightTimeout:
+                    pass
+                result = await self._wait_for_search_result(target, timeout_ms / 1_000)
+                await result.click()
+                break
+            except TimeoutError as exc:
+                last_exc = exc
+                if attempt < 2:
+                    await asyncio.sleep(1)
+                    continue
+                raise BotNotFoundError(
+                    f"bot not found via search: {target}; check the @username is correct"
+                ) from exc
 
         try:
             await self._composer().wait_for(state="visible", timeout=timeout_ms)
