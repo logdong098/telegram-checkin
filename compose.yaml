@@ -14,6 +14,7 @@ services:
       LOGIN_PORT: 18082
     ports:
       - "0.0.0.0:18082:18082"
+      - "0.0.0.0:18083:18083"
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - telegram-checkin-data:/data
