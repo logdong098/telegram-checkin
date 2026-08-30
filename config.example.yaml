@@ -1,0 +1,21 @@
+schedule:
+  time: "08:30"
+  timezone: "Asia/Shanghai"
+
+bots:
+  # Prefer an exact @username. A display name only works when the bot is
+  # already present in the account's chat list and the name is unique.
+  - name: "@replace_with_bot_username"
+    start_command: "/start"
+    button: "签到"
+    timeout_seconds: 30
+    success_patterns:
+      - "签到成功"
+      - "打卡成功"
+    already_patterns:
+      - "今日已签到"
+      - "今天已签到"
+      - "已签到"
+    failure_patterns:
+      - "签到失败"
+      - "打卡失败"

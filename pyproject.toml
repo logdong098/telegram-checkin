@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "telegram-checkin"
+version = "0.1.0"
+description = "Scheduled Telegram bot check-ins through a user account"
+requires-python = ">=3.10"
+dependencies = [
+  "playwright==1.62.0",
+  "PyYAML==6.0.2",
+]
+
+[project.scripts]
+telegram-checkin = "telegram_checkin.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
