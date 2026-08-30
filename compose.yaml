@@ -11,9 +11,9 @@ services:
       CONFIG_PATH: /app/config.yaml
       DATA_DIR: /data
       LOGIN_HOST: 0.0.0.0
-      LOGIN_PORT: 18080
+      LOGIN_PORT: 18082
     ports:
-      - "127.0.0.1:18080:18080"
+      - "0.0.0.0:18082:18082"
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - telegram-checkin-data:/data

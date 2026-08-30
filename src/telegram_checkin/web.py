@@ -108,14 +108,22 @@ class TelegramWebClient:
     async def open_bot(self, target: str, timeout_seconds: int) -> None:
         page = self._require_page()
         timeout_ms = timeout_seconds * 1_000
-        if target.startswith("@"):
-            safe_target = quote(target, safe="@_")
-            await page.goto(
-                f"{self._runtime.telegram_web_url}#{safe_target}",
-                wait_until="domcontentloaded",
-            )
-        else:
-            await self._open_bot_by_display_name(target, timeout_ms)
+        # Telegram Web K (current) does not reliably route to a chat from a
+        # bare `#@username` fragment navigation in a fresh page; always load
+        # home and open the peer via search, which is the stable path.
+        await page.goto(self._runtime.telegram_web_url, wait_until="domcontentloaded")
+        await self.ensure_authenticated()
+        search = page.locator(_SEARCH_SELECTOR).first
+        await search.wait_for(state="visible", timeout=timeout_ms)
+        search_query = target[:-4] if target.casefold().endswith(" bot") else target
+        await search.fill(search_query)
+        try:
+            result = await self._wait_for_search_result(target, timeout_ms / 1_000)
+            await result.click()
+        except TimeoutError as exc:
+            raise BotNotFoundError(
+                f"bot not found via search: {target}; check the @username is correct"
+            ) from exc
 
         try:
             await self._composer().wait_for(state="visible", timeout=timeout_ms)
@@ -141,8 +149,11 @@ class TelegramWebClient:
 
         before = await self._message_snapshot()
         before_toast = await self._visible_toast_text()
+        before_buttons = await self._buttons_texts()
         await button.click()
-        return await self._wait_for_conversation_change(before, before_toast, timeout_seconds)
+        return await self._wait_for_conversation_change(
+            before, before_toast, timeout_seconds, before_buttons=before_buttons
+        )
 
     async def _open_bot_by_display_name(self, target: str, timeout_ms: int) -> None:
         page = self._require_page()
@@ -170,47 +181,133 @@ class TelegramWebClient:
                 candidate = matches.nth(index)
                 if not await candidate.is_visible():
                     continue
-                candidate_text = " ".join(
-                    (await candidate.locator(".peer-title").inner_text()).casefold().split()
+                title_text = " ".join(
+                    (await candidate.locator(".peer-title").first.inner_text()).casefold().split()
                 )
-                if candidate_text in {target_text, target_without_bot} or target_without_bot in candidate_text:
+                sub_text = " ".join(
+                    (await candidate.locator(".row-subtitle").first.inner_text()).casefold().split()
+                )
+                candidate_text = f"{title_text} {sub_text}"
+                bare_target = target_text.lstrip("@")
+                if (
+                    target_text in candidate_text
+                    or target_without_bot in candidate_text
+                    or bare_target in candidate_text
+                    or candidate_text in {target_text, target_without_bot, bare_target}
+                ):
                     return candidate
             await asyncio.sleep(0.5)
         raise TimeoutError(f"search result not found: {target}")
 
     async def _wait_for_button(self, expected_text: str, timeout_seconds: int) -> Locator:
         deadline = monotonic() + timeout_seconds
-        buttons = self._require_page().locator(_BUTTON_SELECTOR)
+        page = self._require_page()
+        buttons = page.locator(_BUTTON_SELECTOR)
         while monotonic() < deadline:
             count = await buttons.count()
             for index in range(count - 1, -1, -1):
                 candidate = buttons.nth(index)
-                if (await candidate.inner_text()).strip() == expected_text and await candidate.is_visible():
+                try:
+                    if (await candidate.inner_text()).strip() != expected_text:
+                        continue
+                    if not await candidate.is_visible():
+                        continue
+                    # Only accept buttons that are not above the current
+                    # viewport (a long chat history makes Playwright report
+                    # off-screen historical buttons as "visible"; clicking
+                    # those no-ops). Buttons below the fold are fine: the
+                    # click action auto-scrolls them into view.
+                    box = await candidate.bounding_box()
+                    if box is None or box["y"] < -50:
+                        continue
                     return candidate
+                except Exception:  # noqa: BLE001
+                    continue
             await asyncio.sleep(0.5)
         raise TimeoutError(f"button not found: {expected_text}")
 
     async def _wait_for_conversation_change(
-        self, before: tuple[tuple[str, str], ...], before_toast: str, timeout_seconds: int
+        self,
+        before: tuple[tuple[str, str], ...],
+        before_toast: str,
+        timeout_seconds: int,
+        before_buttons: tuple[str, ...] | None = None,
     ) -> str:
         deadline = monotonic() + timeout_seconds
         while monotonic() < deadline:
+            popup_text = await self._read_and_dismiss_popup()
+            if popup_text:
+                return popup_text
             after = await self._message_snapshot()
             changed = changed_message_texts(before, after)
             toast = await self._visible_toast_text()
             new_toast = toast if toast != before_toast else ""
-            if changed or new_toast:
-                return "\n".join((*changed, new_toast) if new_toast else changed)
+            button_change = ""
+            if before_buttons is not None:
+                after_buttons = await self._buttons_texts()
+                if after_buttons != before_buttons:
+                    button_change = " ".join(after_buttons)
+            if changed or new_toast or button_change:
+                parts = (*changed, new_toast) if new_toast else changed
+                if button_change:
+                    parts = (*parts, f"[buttons: {button_change}]")
+                return "\n".join(parts)
             await asyncio.sleep(0.5)
         raise TimeoutError(f"conversation did not change within {timeout_seconds} seconds")
 
+    async def _read_and_dismiss_popup(self) -> str:
+        """Read a visible popup dialog (e.g. a bot's 'already checked in'
+        confirmation) and dismiss it with OK. Returns its text or ''."""
+        page = self._require_page()
+        popup = page.locator(".popup-container").first
+        try:
+            if not await popup.is_visible():
+                return ""
+        except Exception:  # noqa: BLE001
+            return ""
+        try:
+            text = " ".join((await popup.inner_text()).split())
+        except Exception:  # noqa: BLE001
+            text = ""
+        # Dismiss via OK / primary button
+        try:
+            ok = popup.locator(".popup-button").first
+            if await ok.count():
+                await ok.click()
+        except Exception:  # noqa: BLE001
+            pass
+        return text
+
+    async def _buttons_texts(self) -> tuple[str, ...]:
+        """Snapshot the current visible reply-markup button labels.
+
+        Some bots confirm a check-in by replacing the button label in place
+        (e.g. 签到 -> 已签到) without appending a new message bubble, so
+        detecting only message changes misses those confirmations.
+        """
+        buttons = self._require_page().locator(_BUTTON_SELECTOR)
+        texts: list[str] = []
+        count = await buttons.count()
+        for index in range(count):
+            try:
+                text = (await buttons.nth(index).inner_text()).strip()
+            except Exception:  # noqa: BLE001 - a stale button must not abort the snapshot
+                continue
+            if text:
+                texts.append(text)
+        return tuple(texts)
+
     async def _message_snapshot(self) -> tuple[tuple[str, str], ...]:
         messages = self._require_page().locator(_MESSAGE_SELECTOR)
+        count = await messages.count()
         snapshot: list[tuple[str, str]] = []
-        for index in range(await messages.count()):
+        for index in range(count):
             message = messages.nth(index)
-            message_id = await message.get_attribute("data-mid")
-            text = " ".join((await message.inner_text()).split())
+            try:
+                message_id = await message.get_attribute("data-mid")
+                text = " ".join((await message.inner_text()).split())
+            except Exception:  # noqa: BLE001 - a stale/removed bubble must not abort the snapshot
+                continue
             if message_id and text:
                 snapshot.append((message_id, text))
         return tuple(snapshot)
