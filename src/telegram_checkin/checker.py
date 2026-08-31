@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import date
 from typing import Protocol
 
@@ -33,6 +34,41 @@ def classify_text(text: str | None, bot: BotConfig) -> CheckStatus | None:
     return None
 
 
+# Some bots (e.g. @shrekpublic_bot) report the date the check-in
+# actually counted towards in the response text, e.g.
+#   "签到日期 | 2026-08-29 22:45"
+# If that date isn't today, the click succeeded but it only counted as a
+# back-fill for a missed day — the user still needs to click again for
+# today. We expose the check so per-bot config can opt in.
+_CHECKIN_DATE_RE = re.compile(
+    r"(?:签到日期|checkin[_ ]?date|date)\s*[\|:｜]\s*(\d{4})[-/](\d{1,2})[-/](\d{1,2})",
+    re.IGNORECASE,
+)
+
+
+def _extract_checkin_date(text: str | None) -> date | None:
+    if not text:
+        return None
+    m = _CHECKIN_DATE_RE.search(text)
+    if not m:
+        return None
+    try:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
+
+
+def _date_mismatch(
+    text: str | None, expected: date
+) -> str | None:
+    """Return a detail suffix if `text` contains a check-in date that
+    isn't today; otherwise None."""
+    actual = _extract_checkin_date(text)
+    if actual is None or actual == expected:
+        return None
+    return f"date guard: bot reported {actual.isoformat()}, expected {expected.isoformat()}"
+
+
 async def check_bot(
     session: TelegramSession,
     store: AttemptStore,
@@ -51,6 +87,17 @@ async def check_bot(
     checkin_response = await session.click_button(bot.button_text, bot.timeout_seconds)
     checkin_status = classify_text(checkin_response, bot)
     if checkin_status is not None:
+        # If the bot reports "success" but the date guard sees an
+        # old check-in date, downgrade to UNCONFIRMED so the user (and
+        # the notification) can act on it.
+        if checkin_status is CheckStatus.SUCCESS and getattr(bot, "enforce_checkin_date", True):
+            mismatch = _date_mismatch(checkin_response, local_date)
+            if mismatch:
+                return CheckResult(
+                    bot.target,
+                    CheckStatus.UNCONFIRMED,
+                    f"{_result_detail(checkin_response)} | {mismatch}",
+                )
         return CheckResult(bot.target, checkin_status, _result_detail(checkin_response))
     return CheckResult(bot.target, CheckStatus.UNCONFIRMED, _result_detail(checkin_response))
 
